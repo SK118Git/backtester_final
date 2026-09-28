@@ -1,0 +1,130 @@
+import feedparser 
+import time
+import calendar 
+import polars as pl
+import os 
+import requests
+from abc import ABC, abstractmethod
+
+
+
+# Generic Classes
+class EntryStruct:
+    def __init__(self): 
+        self.publication_date:int|None = 0 
+        self.title:str = ""
+        self.summary:str = ""
+        self.link:str = ""
+        return
+    
+class FeedStruct(ABC):
+    def __init__(self, raw_feed, source_name:str):
+        self.source_name = source_name 
+        self.fetch_date = time.time()
+        self.entries = self.populate_entries(raw_feed)
+    @abstractmethod
+    def populate_entries(self, raw_feed)->list[EntryStruct]:
+        ... 
+    
+
+
+
+# Sub-Class for Feedparser 
+class FPES(EntryStruct):
+    def __init__(self, ra):
+        
+        pp = raw_entry.get("published_parsed")
+        self.publication_date = calendar.timegm(pp) if pp else None
+        self.title = raw_entry.get("title") 
+        self.summary = raw_entry.get("summary")
+        self.link = raw_entry.get("link")
+        if self.link is None:
+            self.link = f"notalink.{self.title}"
+
+class FPFS(FeedStruct):
+    def populate_entries(self, raw_feed:feedparser.FeedParserDict):
+        l = [] 
+        for entry in raw_feed.entries: 
+            l.append(FPES(entry))
+        return l 
+
+
+# Sub-Class for GDELT 
+
+
+
+
+
+
+
+
+
+def parse_feed(source_type:str, source_name:str, url:str):
+    if source_type == "feedparser":
+        feed = feedparser.parse(url)
+        print(feed.version, feed.bozo, len(feed.entries))
+        if not(feed.version):
+            print("Bad URL: not a recognised feed")
+            return 
+        if len(feed.entries) == 0:
+            print("Bad URL: the feed obtained has 0 entries")
+            return 
+    elif source_type == "gdelt":
+        res = requests.get(url)
+        parsed_request = parse_json(res)
+        feed = 
+        ...
+    else: 
+        feed = ...
+        ... 
+    feed = {}
+    return FeedStruct(feed, source_name)
+
+
+def output_feeds(list_feeds:list[FeedStruct])->pl.DataFrame:
+    rows = [] 
+    if len(list_feeds) == 0:
+        return 
+    for feed in list_feeds:
+        for entry in feed.entries:
+            rows.append({
+                "source": feed.source_name,
+                "publication_time": entry.publication_date,
+                "fetch_time": feed.fetch_date,
+                "title": entry.title,
+                "summary": entry.summary,
+                "link": entry.link
+            })
+    df = pl.DataFrame(rows).with_columns(
+        pl.from_epoch("publication_time", time_unit="s").dt.replace_time_zone("UTC"),
+        pl.from_epoch("fetch_time", time_unit="s").dt.replace_time_zone("UTC")
+    )
+    return df  
+
+
+def append_save(df:pl.DataFrame, path: str):
+    if os.path.exists(path):
+        old = pl.read_parquet(path)
+        combined = pl.concat([old, df])
+    else: 
+        combined = df
+    combined = combined.unique(subset=["source", "link"], keep="first")
+    combined.write_parquet(path)
+    return 
+    
+
+def run_feed_parser(feed_sources:list[tuple[str, str, str]],path:str):
+    l = []
+    for (source_type, source_name, url) in feed_sources:
+        parsed = parse_feed(source_type, source_name, url)
+        if parsed is not None: 
+            l.append(parsed)
+        else: 
+            print(f"Skipped {source_name} ({url})")
+    df = output_feeds(l)
+    if df is not None: 
+        append_save(df, path)
+    return 
+    
+
+
