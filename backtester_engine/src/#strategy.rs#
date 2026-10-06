@@ -1,0 +1,27 @@
+
+trait Param {
+    
+}
+
+trait Strategy {
+    // A Strategy must request params from a central DB of defined params (some defined externally to the rust backtester engine)
+    // Thus the params ought to be all saved to a timeseries to be freely edited by these different programs
+    requ_params: Vec<Param>, 
+}
+
+impl Strategy {
+    // Transforms raw data timeseries and params time series into a signal timeseries (buy sell w/ magintude)
+    // ths function serves as a generalized wrapper cracterising any backtester strategy 
+    // the inside of the strategy will thus depend on the way the specific strat is defined: could be vectorized or event driven or a mix of both, this class definition doesn't care
+   fn tranformer(raw_data, params: Vec<Param>) -> signals {
+       
+   }  
+    // before executing the strategy must validate which params are being requested against a table of known params
+    // and then extract the relevant timeseries for use (because we only want to keep the relevant params)
+    fn fetch_params(req_params:Vec<Param>) -> params:Vec<Param> {
+
+    }
+
+    // It should be noted that some params (event driven) will only exist within the confines of a strategy with a local scope, vectorizable strategies inputs can be saves as these timeseries params.
+    
+}
