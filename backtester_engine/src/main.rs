@@ -7,6 +7,7 @@ mod state;
 mod engine;
 
 
+
 fn main() -> Result<(), Box<dyn std::error::Error>>{
     
     //ingest::ingest("eurusd/eurusd-tick-2020-01-01-2021-01-01.csv")?;
@@ -14,3 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
     Ok(())
 }
 
+
+
+#[cfg(test)]
+mod test_helpers;

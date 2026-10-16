@@ -1,6 +1,9 @@
 use crate::state::PositionState;
 use crate::ir::*;
 
+#[cfg(test)]
+use crate::test_helpers::*;
+
 pub fn eval(expr:&Expr, q:&Quote, features:&[f64], state: &PositionState) -> Value {
    match expr {
        Expr::Const(x) => Value::Num(*x),
@@ -43,6 +46,24 @@ pub fn eval(expr:&Expr, q:&Quote, features:&[f64], state: &PositionState) -> Val
 
 
 
+
+
+pub fn select_action<'a>(
+    strategy: &'a Strategy, 
+    q: &Quote,
+    features:&[f64],
+    state: &PositionState,
+) -> Option<&'a Action> {
+    strategy.rules.iter()
+	.find(|rule| eval(&rule.when, q, features, state).boolean())
+	.map(|rule| &rule.then)
+}
+
+
+
+
+// Tests
+
 #[test]
 fn long_take_profit_fires() {
     let expr = tp_expr();
@@ -73,37 +94,6 @@ fn short_in_profit_fires() {
     let state = short_at(1.1000);
     let q = Quote { ts: 100, bid: 1.0973, ask: 1.0975 };  // short exits at ask 1.0975, +25 pips
     assert_eq!(eval(&expr, &q, &[], &state).boolean(), true);
-}
-
-
-fn tp_expr() -> Expr {
-    Expr::Binary(BinOp::Gt, Box::new(Expr::State(StateField::UnrealizedPnl)), Box::new(Expr::Const(0.0020)))
-}
-
-fn long_at(p:f64) -> PositionState {
-    PositionState { position_size: 1.0, avg_entry_price: p, high_water_mark: p,
-                    low_water_mark: p, entry_time: 0, num_entries: 1, num_exits: 0 }
-}
-
-fn short_at(p:f64) -> PositionState { PositionState { position_size: -1.0, ..long_at(p)}}
-
-
-
-
-
-
-
-
-
-pub fn select_action<'a>(
-    strategy: &'a Strategy, 
-    q: &Quote,
-    features:&[f64],
-    state: &PositionState,
-) -> Option<&'a Action> {
-    strategy.rules.iter()
-	.find(|rule| eval(&rule.when, q, features, state).boolean())
-	.map(|rule| &rule.then)
 }
 
 
