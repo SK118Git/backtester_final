@@ -4,7 +4,8 @@ pub enum Expr {
     Const(f64),
     BoolConst(bool),
     Feature(FeatureId),
-    State(StateField),
+    State(StateField), // live: this instrument at this instant 
+    Account(AccountField), // frozen snapshot: portfolio-wide, lagged one-instant
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Cond { cond: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr>}
@@ -27,6 +28,13 @@ pub enum StateField{
     TrailingDist
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AccountField {
+    Equity, 
+    Cash, 
+    RealizedPnl,
+    MarketValue,
+}
 
 
 #[derive(Debug, Clone, Copy, PartialEq)]

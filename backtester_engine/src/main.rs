@@ -5,7 +5,9 @@ mod ingest;
 mod ir;
 mod state;
 mod engine;
-
+mod costs;
+mod fill;
+mod portfolio;
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>>{
