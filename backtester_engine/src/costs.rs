@@ -1,5 +1,6 @@
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub enum SlippageModel {
    None, 
    FixedPips(f64),
@@ -7,14 +8,14 @@ pub enum SlippageModel {
 }
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub enum FillBias { 
     Adverse, //pessimistic: assume the worst fill 
     Favorable, //optimistic 
     Mid, 
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct CostConfig {
     pub slippage: SlippageModel,
     pub fill_bias: FillBias,

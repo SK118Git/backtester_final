@@ -20,7 +20,7 @@ fn target_triggered(order: &RestingOrder, q:&Quote, is_long:bool) -> bool {
    
 }
 
-
+#[derive(Debug, Clone)]
 pub enum FillReason {Stop, Target, Discretionary}
 
 
