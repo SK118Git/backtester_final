@@ -26,3 +26,10 @@ impl Default for CostConfig {
 	CostConfig { slippage: SlippageModel::None, fill_bias: FillBias::Adverse}
     }
 }
+
+pub fn compute_cost(lots: f64, price:f64, cfg:&CostConfig) -> f64 {
+    match cfg.slippage {
+	SlippageModel::None => 0.0,
+	SlippageModel::FixedPips(pips) => pips * lots.abs()
+    }
+}

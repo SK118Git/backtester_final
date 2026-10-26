@@ -18,6 +18,10 @@ pub struct PositionState{
     pub orders: OrderState,
 }
 
+pub struct ApplyResult {
+    pub realized: f64,
+    pub closed_out:bool
+}
 
 impl PositionState{
     fn exit_price(&self, q:&Quote) ->f64 {if self.position_size > 0.0 {q.bid} else {q.ask}}
@@ -51,7 +55,7 @@ impl PositionState{
 	}
     }
     
-    pub fn apply(&mut self, action:&Action, fill_price:f64, ctx: &MarketCtx) {
+    pub fn apply(&mut self, action:&Action, fill_price:f64, ctx: &MarketCtx)-> ApplyResult {
 	match action {
 	    Action::Enter {side, size} => {
 		let lots = match size {
@@ -72,25 +76,29 @@ impl PositionState{
 		    self.avg_entry_price = (self.position_size * self.avg_entry_price + signed * fill_price) / new_size 
 		}
 		self.position_size = new_size;
-		self.num_entries += 1
+		self.num_entries += 1;
+		ApplyResult {realized: 0.0, closed_out: false}
 	    },
 	    Action::Exit{size} => {
-		if self.position_size == 0.0 { return;} // you can't exit out of a flat position a priori 
+		if self.position_size == 0.0 { return ApplyResult {realized: 0.0, closed_out: false} } // you can't exit out of a flat position a priori 
 		let mut close_lots = match size {
 		    Size::Lots(n) => *n, 
 		    Size::RiskPct(_) => todo!("RiskPct on Exit is nonsence - Cl should catch this"),
 		    Size::Fraction(f) => self.position_size.abs() * f
 		};
 		close_lots = close_lots.min(self.position_size.abs()); // disallow over-exit for simplicity 
+
+		let realized = (fill_price - self.avg_entry_price) * close_lots *self.position_size.signum();
 		let dir = if self.position_size > 0.0 {-1.0} else {1.0}; //current dir 
 		self.position_size += dir * close_lots;
 		self.num_exits += 1;
 		
 		// TODO: Realize P&L into account state 
-
-		if self.position_size.abs() < 1e-9 { // garde-fou 
+		let closed_out = self.position_size.abs() < 1e-9;
+		if closed_out { // garde-fou 
 		    self.close_out(); 
 		}
+		ApplyResult {realized: realized, closed_out: closed_out} 
 	    },
 	    Action::SetStop {kind, level} => {
 		let lvl = eval(level, ctx, self).num();
@@ -101,13 +109,15 @@ impl PositionState{
 			StopKind::Trailing => Some(level.clone()),
 		    }
 		});
+		ApplyResult {realized: 0.0, closed_out: false}
 	    },
 	    Action::SetTarget { level } => {
 		let lvl = eval(level, ctx, self).num();
 		self.orders.target = Some(RestingOrder {level: lvl, trailing:None});
+		ApplyResult {realized: 0.0, closed_out: false}
 	    },
-	    Action::CancelStop => self.orders.stop = None,
-	    Action::CancelTarget => self.orders.target = None, 
+	    Action::CancelStop => {self.orders.stop = None; ApplyResult {realized: 0.0, closed_out: false}},
+	    Action::CancelTarget => {self.orders.target = None; ApplyResult {realized: 0.0, closed_out: false}},
 	}
     }
     

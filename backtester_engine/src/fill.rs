@@ -55,21 +55,31 @@ pub fn resolve_resting(state:&PositionState, q:&Quote, cfg: &CostConfig) -> Opti
     if state.position_size == 0.0 {return None;}
     let is_long = state.position_size > 0.0;
     let market = if is_long {q.bid} else {q.ask};
+    let lots = -state.position_size;
     
     // Stop takes priority 
     if let Some(stop) = &state.orders.stop {
 	if stop_triggered(stop, q, is_long) {
 	    let price = fill_price(stop.level, market, is_long, FillKind::Stop, cfg.fill_bias);
-	    return Some(Fill {price, lots: -state.position_size, reason: FillReason::Stop, cost: 0.0});
+	    let cost = compute_cost(lots, price, cfg);
+	    return Some(Fill {price, lots: lots, reason: FillReason::Stop, cost: cost});
 	}
     }
     if let Some(tgt) = &state.orders.target {
 	if target_triggered(tgt, q, is_long) {
 	    let price = fill_price(tgt.level, market, is_long, FillKind::Target, cfg.fill_bias);
-	    return Some(Fill {price, lots: -state.position_size, reason: FillReason::Target, cost:0.0});
+	    let cost = compute_cost(lots, price, cfg);
+	    return Some(Fill {price, lots: lots, reason: FillReason::Target, cost:cost});
 	}
     }
     None 
+}
+
+
+pub fn price_discretionary(signed_lots: f64, q:&Quote, cfg: &CostConfig) -> Fill {
+    let price = if signed_lots > 0.0 {q.ask} else {q.bid};
+    let cost = compute_cost(signed_lots, price, cfg);
+    Fill { price, lots: signed_lots, cost, reason: FillReason::Discretionary }
 }
 
 
@@ -188,5 +198,65 @@ mod tests {
         s.orders.stop = Some(RestingOrder { level: 1.0980, trailing: None }); // shouldn't exist, but guard it
         let q = Quote { ts: 1, bid: 1.0000, ask: 1.0002 };
         assert!(resolve_resting(&s, &q, &CostConfig::default()).is_none(), "flat => no fills");
+    }
+    // --- compute_cost: the cost model ---
+
+    #[test]
+    fn no_slippage_is_zero_cost() {
+        let cfg = CostConfig { slippage: SlippageModel::None, fill_bias: FillBias::Adverse };
+        assert!(approx(compute_cost(5.0, 1.1000, &cfg), 0.0), "None => no cost");
+        assert!(approx(compute_cost(-5.0, 1.1000, &cfg), 0.0), "None => no cost, any sign");
+    }
+
+    #[test]
+    fn fixed_pips_cost_scales_with_size_not_sign() {
+        let cfg = CostConfig { slippage: SlippageModel::FixedPips(0.0001), fill_bias: FillBias::Adverse };
+        // cost = pips × |lots| = 0.0001 × 3 = 0.0003
+        assert!(approx(compute_cost(3.0, 1.1000, &cfg), 0.0003), "cost scales with size");
+        // sign of lots must not change cost — buying and selling cost the same
+        assert!(approx(compute_cost(-3.0, 1.1000, &cfg), 0.0003), "cost uses |lots|, sign-independent");
+    }
+
+    // --- price_discretionary: honest side selection for commanded fills ---
+
+    #[test]
+    fn discretionary_buy_lifts_the_ask() {
+        let cfg = CostConfig::default();
+        let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+        let fill = price_discretionary(2.0, &q, &cfg);   // +2 = buying
+        assert!(approx(fill.price, 1.1002), "buyer pays the ask");
+        assert!(approx(fill.lots, 2.0));
+        assert!(matches!(fill.reason, FillReason::Discretionary));
+    }
+
+    #[test]
+    fn discretionary_sell_hits_the_bid() {
+        let cfg = CostConfig::default();
+        let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+        let fill = price_discretionary(-2.0, &q, &cfg);  // -2 = selling
+        assert!(approx(fill.price, 1.1000), "seller receives the bid");
+        assert!(approx(fill.lots, -2.0));
+    }
+
+    #[test]
+    fn discretionary_cost_applied() {
+        let cfg = CostConfig { slippage: SlippageModel::FixedPips(0.0001), fill_bias: FillBias::Adverse };
+        let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+        let fill = price_discretionary(4.0, &q, &cfg);
+        assert!(approx(fill.price, 1.1002), "buy at ask");
+        assert!(approx(fill.cost, 0.0004), "cost = 0.0001 × 4 lots");
+    }
+
+    // --- cost flows through resolve_resting too ---
+
+    #[test]
+    fn resting_fill_carries_cost() {
+        let mut s = long_at(1.1000);
+        s.orders.stop = Some(RestingOrder { level: 1.0980, trailing: None });
+        let q = Quote { ts: 1, bid: 1.0975, ask: 1.0977 };
+        let cfg = CostConfig { slippage: SlippageModel::FixedPips(0.0001), fill_bias: FillBias::Adverse };
+        let fill = resolve_resting(&s, &q, &cfg).expect("stop fires");
+        // cost = 0.0001 × |lots| where lots = -position_size
+        assert!(approx(fill.cost, 0.0001 * s.position_size.abs()), "resting fill priced with cost");
     }
 }
