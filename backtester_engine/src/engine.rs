@@ -62,12 +62,11 @@ pub fn select_action<'a>(
     strategy: &'a Strategy, 
     ctx: &MarketCtx,
     state:&'a PositionState,
-) -> Option<&'a Action> {
+) -> Option<&'a Vec<Action>> {
     strategy.rules.iter()
 	.find(|rule| eval(&rule.when, ctx, state).boolean())
 	.map(|rule| &rule.then)
 }
-
 
 
 
@@ -120,11 +119,11 @@ fn first_match_wins_exit_before_entry() {
                 when: Expr::Binary(BinOp::Gt,
                     Box::new(Expr::State(StateField::UnrealizedPnl)),
                     Box::new(Expr::Const(0.0020))),
-                then: Action::Exit { size: Size::Fraction(1.0) },
+                then: vec![Action::Exit { size: Size::Fraction(1.0) }],   // ← vec!
             },
             Rule {
                 when: Expr::BoolConst(true),
-                then: Action::Enter { side: Side::Long, size: Size::Lots(1.0) },
+                then: vec![Action::Enter { side: Side::Long, size: Size::Lots(1.0) }],  // ← vec!
             },
         ],
     };
@@ -134,8 +133,38 @@ fn first_match_wins_exit_before_entry() {
     let pf = test_pf();
     let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
 
-    match select_action(&strategy, &ctx, &state) {
-        Some(Action::Exit { .. }) => {}
+    // select_action now returns the first matching rule's ACTION LIST.
+    let actions = select_action(&strategy, &ctx, &state).expect("a rule should fire");
+    // Both rules match; first-match-wins picks rule 0 (the exit list).
+    assert_eq!(actions.len(), 1, "rule 0 has one action");
+    match &actions[0] {
+        Action::Exit { .. } => {}  // correct — exit won by order
         other => panic!("expected Exit to win by order, got {other:?}"),
     }
+}
+
+#[test]
+fn rule_can_carry_multiple_actions() {
+    let strategy = Strategy {
+        rules: vec![
+            Rule {
+                when: Expr::BoolConst(true),
+                then: vec![
+                    Action::Enter { side: Side::Long, size: Size::Lots(1.0) },
+                    Action::SetStop { kind: StopKind::Fixed, level: Box::new(Expr::Const(1.0980)) },
+                    Action::SetTarget { level: Box::new(Expr::Const(1.1050)) },
+                ],
+            },
+        ],
+    };
+    let state = flat();
+    let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+    let pf = test_pf();
+    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
+
+    let actions = select_action(&strategy, &ctx, &state).expect("rule fires");
+    assert_eq!(actions.len(), 3, "entry + stop + target in one rule");
+    assert!(matches!(actions[0], Action::Enter { .. }));
+    assert!(matches!(actions[1], Action::SetStop { .. }));
+    assert!(matches!(actions[2], Action::SetTarget { .. }));
 }

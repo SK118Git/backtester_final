@@ -1,10 +1,12 @@
 use crate::ir::*;
 use crate::engine::{eval, MarketCtx};
+use crate::fill::*;
 
 
 #[cfg(test)]
 use crate::test_helpers::*;
 
+#[derive(Debug)]
 pub struct PositionState{
     pub position_size:f64,
     pub avg_entry_price:f64,
@@ -55,6 +57,226 @@ impl PositionState{
 	}
     }
     
+
+    pub fn apply_fill(&mut self, fill:&Fill) -> ApplyResult {
+	let signed = fill.lots;
+	let price = fill.price;
+	let is_reducing = self.position_size != 0.0 && signed.signum() != self.position_size.signum();
+	if is_reducing {
+	    let close_lots = signed.abs();
+	    debug_assert!(close_lots <= self.position_size.abs() + 1e-9, "apply_fill received a zero-crossing fill; resolver must clamp/decompose");
+	    let realized = (price - self.avg_entry_price) * close_lots * self.position_size.signum();
+	    self.position_size += signed ; 
+	    self.num_exits += 1;
+	    let closed_out = self.position_size.abs() < 1e-9;
+	    if closed_out {self.close_out()};
+	    ApplyResult { realized, closed_out }
+	} else {
+	    let new_size = self.position_size + signed;
+	    if self.position_size == 0.0 {
+		self.avg_entry_price = price;
+		self.entry_time = fill.ts;
+		self.high_water_mark = price;
+		self.low_water_mark = price;
+	    } else {
+		self.avg_entry_price = (self.position_size * self.avg_entry_price + signed * price) / new_size;
+	    }
+	    self.position_size = new_size;
+	    self.num_entries += 1;
+	    ApplyResult { realized: 0.0, closed_out: false }
+	}
+    }
+    
+    pub fn apply_order(&mut self, action: &Action, ctx: &MarketCtx) {
+	match action {
+	    Action::SetStop { kind, level } => {
+		let lvl = eval(level, ctx, self).num();
+		self.orders.stop = Some(RestingOrder { 
+		    level: lvl, 
+		    trailing: match kind {
+			StopKind::Fixed => None,
+			StopKind::Trailing => Some(level.clone()),
+		    },
+		});
+	    }
+	    Action::SetTarget { level } => {
+		let lvl = eval(level, ctx, self).num();
+		self.orders.target = Some(RestingOrder { level: lvl, trailing: None });
+	    }
+	    Action::CancelStop => self.orders.stop = None,
+	    Action::CancelTarget => self.orders.target = None, 
+	    Action::Enter { .. } | Action::Exit { .. } => {
+		debug_assert!(false, "apply_order called with a fill action; should use action_to_fills instead")
+	    }
+	}
+    }
+    fn close_out(&mut self) {
+	self.position_size = 0.0;
+	self.avg_entry_price = 0.0; 
+	self.high_water_mark = 0.0;
+	self.low_water_mark = 0.0 ;
+	self.entry_time = 0;
+	self.orders.stop = None;
+	self.orders.target = None; 
+    }
+    pub fn flat() -> Self {
+	PositionState { position_size: 0.0, avg_entry_price: 0.0, high_water_mark: 0.0, low_water_mark: 0.0, entry_time: 0, num_entries: 0, num_exits: 0, orders: OrderState::default() }
+    }
+}
+
+
+#[derive(Debug)]
+pub struct RestingOrder{
+    // The current effective stop price, frozen for a Fixed and moving for Trailing
+    pub level: f64, 
+    // For trailing: the expr we use to re-evaluate the level
+    pub trailing: Option<Box<Expr>>
+}
+
+#[derive(Default, Debug)]
+pub struct OrderState {
+    pub stop: Option<RestingOrder>, 
+    pub target: Option<RestingOrder>
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::*;   // flat, long_at, short_at, approx, test_pf, trailing_long_expr, etc.
+
+    // Helper: build a Fill for apply_fill tests.
+    fn fill(ts: i64, price: f64, lots: f64) -> Fill {
+        Fill { ts, price, lots, cost: 0.0, reason: FillReason::Discretionary }
+    }
+
+    // ---------- apply_fill: opening / adding ----------
+
+    #[test]
+    fn open_from_flat_sets_basis() {
+        let mut s = flat();
+        let r = s.apply_fill(&fill(500, 1.1000, 2.0));   // buy 2
+        assert!(approx(s.position_size, 2.0));
+        assert!(approx(s.avg_entry_price, 1.1000), "basis = fill price on open");
+        assert_eq!(s.entry_time, 500, "entry_time = fill ts");
+        assert_eq!(s.num_entries, 1);
+        assert!(approx(r.realized, 0.0), "opening realizes nothing");
+        assert!(!r.closed_out);
+    }
+
+    #[test]
+    fn short_open_is_negative() {
+        let mut s = flat();
+        s.apply_fill(&fill(1, 1.1000, -2.0));   // sell 2 from flat = short
+        assert!(approx(s.position_size, -2.0));
+        assert!(approx(s.avg_entry_price, 1.1000));
+    }
+
+    #[test]
+    fn add_reaverages_basis() {
+        let mut s = flat();
+        s.apply_fill(&fill(1, 1.1000, 2.0));
+        s.apply_fill(&fill(2, 1.1020, 2.0));    // same direction = add
+	let got = s.avg_entry_price;
+	assert!(approx(got, 1.1010), "expected 1.1010, got {got}");
+        assert!(approx(s.position_size, 4.0));
+        assert!(approx(s.avg_entry_price, 1.1010), "equal-size add averages");
+        assert_eq!(s.entry_time, 1, "entry_time stays at first entry");
+        assert_eq!(s.num_entries, 2);
+    }
+
+    #[test]
+    fn weighted_add() {
+        let mut s = flat();
+        s.apply_fill(&fill(1, 1.1000, 1.0));
+        s.apply_fill(&fill(2, 1.1040, 3.0));    // (1·1.1000 + 3·1.1040)/4 = 1.1030
+        assert!(approx(s.avg_entry_price, 1.1030), "size-weighted basis");
+    }
+
+    // ---------- apply_fill: reducing / closing ----------
+
+    #[test]
+    fn partial_reduce_keeps_basis() {
+        let mut s = flat();
+        s.apply_fill(&fill(1, 1.1000, 4.0));         // long 4
+        let r = s.apply_fill(&fill(2, 1.1030, -2.0)); // sell 2
+        assert!(approx(s.position_size, 2.0), "reduced to 2");
+        assert!(approx(s.avg_entry_price, 1.1000), "basis unchanged on reduce");
+        assert_eq!(s.num_exits, 1);
+        assert!(approx(r.realized, 0.006), "(1.1030-1.1000)*2*(+1)");
+        assert!(!r.closed_out, "still holding 2");
+    }
+
+    #[test]
+    fn full_close_resets_and_realizes() {
+        let mut s = flat();
+        s.apply_fill(&fill(1, 1.1000, 2.0));
+        s.orders.stop = Some(RestingOrder { level: 1.0980, trailing: None });
+        let r = s.apply_fill(&fill(2, 1.1050, -2.0));  // sell all 2
+        assert!(approx(s.position_size, 0.0), "flat");
+        assert!(approx(s.avg_entry_price, 0.0), "basis reset");
+        assert!(approx(s.high_water_mark, 0.0), "water marks reset");
+        assert_eq!(s.entry_time, 0, "entry_time reset");
+        assert!(s.orders.stop.is_none(), "resting orders cleared on close");
+        assert!(approx(r.realized, 0.010), "(1.1050-1.1000)*2*(+1)");
+        assert!(r.closed_out);
+    }
+
+    #[test]
+    fn short_close_realizes_positive_when_covered_lower() {
+        let mut s = flat();
+        s.apply_fill(&fill(1, 1.1000, -2.0));          // short 2 @ 1.1000
+        let r = s.apply_fill(&fill(2, 1.0950, 2.0));   // buy 2 to cover @ 1.0950
+        assert!(approx(s.position_size, 0.0));
+        // realized = (1.0950-1.1000)*2*(-1) = +0.010 — shorted high, covered low
+        assert!(approx(r.realized, 0.010), "short profit on lower cover");
+        assert!(r.closed_out);
+    }
+
+    // ---------- apply_order: stop/target registration ----------
+
+    #[test]
+    fn set_fixed_stop_evaluates_once() {
+        let mut s = long_at(1.1000);
+        s.high_water_mark = 1.1030;
+        let q = Quote { ts: 1, bid: 1.1025, ask: 1.1027 };
+        let pf = test_pf();
+        let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
+        s.apply_order(&Action::SetStop { kind: StopKind::Fixed, level: Box::new(Expr::Const(1.0980)) }, &ctx);
+        let stop = s.orders.stop.as_ref().unwrap();
+        assert!(approx(stop.level, 1.0980));
+        assert!(stop.trailing.is_none(), "fixed => no stored expr");
+    }
+
+    #[test]
+    fn set_trailing_stop_stores_expr() {
+        let mut s = long_at(1.1000);
+        s.high_water_mark = 1.1030;
+        let q = Quote { ts: 1, bid: 1.1030, ask: 1.1032 };
+        let pf = test_pf();
+        let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
+        s.apply_order(&Action::SetStop { kind: StopKind::Trailing, level: Box::new(trailing_long_expr(0.0010)) }, &ctx);
+        let stop = s.orders.stop.as_ref().unwrap();
+        assert!(approx(stop.level, 1.1020), "initial level evaluated now");
+        assert!(stop.trailing.is_some());
+    }
+
+    #[test]
+    fn cancel_clears_stop() {
+        let mut s = long_at(1.1000);
+        s.orders.stop = Some(RestingOrder { level: 1.0980, trailing: None });
+        let q = Quote { ts: 1, bid: 0.0, ask: 0.0 };
+        let pf = test_pf();
+        let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
+        s.apply_order(&Action::CancelStop, &ctx);
+        assert!(s.orders.stop.is_none());
+    }
+
+}
+
+
+
+   /* 
     pub fn apply(&mut self, action:&Action, fill_price:f64, ctx: &MarketCtx)-> ApplyResult {
 	match action {
 	    Action::Enter {side, size} => {
@@ -120,234 +342,5 @@ impl PositionState{
 	    Action::CancelTarget => {self.orders.target = None; ApplyResult {realized: 0.0, closed_out: false}},
 	}
     }
-    
-    fn close_out(&mut self) {
-	self.position_size = 0.0;
-	self.avg_entry_price = 0.0; 
-	self.high_water_mark = 0.0;
-	self.low_water_mark = 0.0 ;
-	self.entry_time = 0;
-	self.orders.stop = None;
-	self.orders.target = None; 
-    }
-}
+    */
 
-
-
-pub struct RestingOrder{
-    // The current effective stop price, frozen for a Fixed and moving for Trailing
-    pub level: f64, 
-    // For trailing: the expr we use to re-evaluate the level
-    pub trailing: Option<Box<Expr>>
-}
-
-#[derive(Default)]
-pub struct OrderState {
-    pub stop: Option<RestingOrder>, 
-    pub target: Option<RestingOrder>
-}
-
-
-
-
-// Tests 
-#[test]
-fn long_stop_ratchets_up() {
-    let mut s = long_at(1.1000);
-    s.high_water_mark = 1.1030;
-    s.orders.stop = Some(RestingOrder { level: 1.1015, trailing: Some(Box::new(trailing_long_expr(0.0010)))});
-    let q = Quote { ts:1, bid:1.1030, ask:1.1032};
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.update_trailing(&ctx);
-    assert!(approx(s.orders.stop.unwrap().level, 1.1020), "stop should ratchet up to new candidate");
-}
-
-#[test]
-fn long_stop_never_drops() {
-    let mut s = long_at(1.1000);
-    s.high_water_mark = 1.1018;
-    s.orders.stop = Some(RestingOrder { level: 1.1015, trailing: Some(Box::new(trailing_long_expr(0.0010)))});
-    let q = Quote { ts:1, bid:1.1018, ask:1.1020};
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.update_trailing(&ctx);
-    assert!(approx(s.orders.stop.unwrap().level, 1.1015), "stop must not drop");
-}
-
-#[test]
-fn short_stop_ratchets_down() {
-    let mut s = short_at(1.1000);
-    s.low_water_mark = 1.0970;
-    s.orders.stop = Some(RestingOrder { level: 1.0985, trailing: Some(Box::new(trailing_short_expr(0.0010))) });
-    let q = Quote { ts: 1, bid: 1.0968, ask: 1.0970 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.update_trailing(&ctx);
-    assert!(approx(s.orders.stop.unwrap().level, 1.0980), "short stop should ratchet down");
-}
-
-#[test]
-fn short_stop_never_rises() {
-    let mut s = short_at(1.1000);
-    s.low_water_mark = 1.0982;
-    s.orders.stop = Some(RestingOrder { level: 1.0985, trailing: Some(Box::new(trailing_short_expr(0.0010))) });
-    let q = Quote { ts: 1, bid: 1.0980, ask: 1.0982 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.update_trailing(&ctx);
-    assert!(approx(s.orders.stop.unwrap().level, 1.0985), "short stop must NOT rise");
-}
-
-#[test]
-fn flat_position_does_not_ratchet() {
-    let mut s = long_at(1.1000);
-    s.position_size = 0.0;
-    s.high_water_mark = 1.1050;
-    s.orders.stop = Some(RestingOrder { level: 1.1015, trailing: Some(Box::new(trailing_long_expr(0.0010))) });
-    let q = Quote { ts: 1, bid: 1.1050, ask: 1.1052 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.update_trailing(&ctx);
-    assert!(approx(s.orders.stop.unwrap().level, 1.1015), "no ratchet while flat");
-}
-
-#[test]
-fn first_entry_sets_basis_to_fill() {
-    let mut s = flat();
-    let q = Quote { ts: 500, bid: 1.0998, ask: 1.1000 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(2.0) }, 1.1000, &ctx);
-    assert!(approx(s.position_size, 2.0));
-    assert!(approx(s.avg_entry_price, 1.1000), "first entry basis = fill price");
-    assert_eq!(s.num_entries, 1);
-    assert_eq!(s.entry_time, 500, "entry_time set on first entry");
-    assert!(approx(s.high_water_mark, 1.1000));
-}
-
-#[test]
-fn scale_in_reaverages_basis() {
-    let mut s = flat();
-    let q = Quote { ts: 1, bid: 0.0, ask: 0.0 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(2.0) }, 1.1000, &ctx);
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(2.0) }, 1.1020, &ctx);
-    assert!(approx(s.position_size, 4.0));
-    assert!(approx(s.avg_entry_price, 1.1010), "equal-size scale-in averages the two fills");
-    assert_eq!(s.num_entries, 2);
-    assert_eq!(s.entry_time, 1, "entry_time stays at FIRST entry");
-}
-
-#[test]
-fn weighted_scale_in() {
-    let mut s = flat();
-    let q = Quote { ts: 1, bid: 0.0, ask: 0.0 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(1.0) }, 1.1000, &ctx);
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(3.0) }, 1.1040, &ctx);
-    assert!(approx(s.avg_entry_price, 1.1030), "basis is size-weighted, not a plain mean");
-}
-
-#[test]
-fn partial_exit_reduces_size_keeps_basis() {
-    let mut s = flat();
-    let q = Quote { ts: 1, bid: 0.0, ask: 0.0 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(4.0) }, 1.1000, &ctx);
-    s.apply(&Action::Exit { size: Size::Fraction(0.5) }, 1.1030, &ctx);
-    assert!(approx(s.position_size, 2.0), "half of 4 lots closed");
-    assert!(approx(s.avg_entry_price, 1.1000), "basis unchanged by partial exit");
-    assert_eq!(s.num_exits, 1);
-    assert!(s.position_size.abs() > 1e-9, "still in a position");
-}
-
-#[test]
-fn full_exit_closes_and_resets() {
-    let mut s = flat();
-    let q = Quote { ts: 500, bid: 0.0, ask: 0.0 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(2.0) }, 1.1000, &ctx);
-    s.orders.stop = Some(RestingOrder { level: 1.0980, trailing: None });
-    s.apply(&Action::Exit { size: Size::Fraction(1.0) }, 1.1050, &ctx);
-    assert!(approx(s.position_size, 0.0), "flat after full exit");
-    assert!(approx(s.avg_entry_price, 0.0), "basis reset");
-    assert!(approx(s.high_water_mark, 0.0), "water marks reset");
-    assert_eq!(s.entry_time, 0, "entry_time reset");
-    assert!(s.orders.stop.is_none(), "resting orders cleared on close");
-}
-
-#[test]
-fn exit_while_flat_is_noop() {
-    let mut s = flat();
-    let q = Quote { ts: 1, bid: 0.0, ask: 0.0 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Exit { size: Size::Fraction(1.0) }, 1.1000, &ctx);
-    assert!(approx(s.position_size, 0.0), "exit on flat does nothing");
-    assert_eq!(s.num_exits, 0, "guard returns before incrementing");
-}
-
-#[test]
-fn short_entry_is_negative_size() {
-    let mut s = flat();
-    let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Enter { side: Side::Short, size: Size::Lots(2.0) }, 1.1000, &ctx);
-    assert!(approx(s.position_size, -2.0), "short => negative size");
-    assert!(approx(s.avg_entry_price, 1.1000));
-}
-
-#[test]
-fn set_fixed_stop_evaluates_once() {
-    let mut s = long_at(1.1000);
-    s.high_water_mark = 1.1030;
-    let q = Quote { ts: 1, bid: 1.1025, ask: 1.1027 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::SetStop { kind: StopKind::Fixed, level: Box::new(Expr::Const(1.0980)) }, 0.0, &ctx);
-    let stop = s.orders.stop.as_ref().unwrap();
-    assert!(approx(stop.level, 1.0980), "fixed stop level evaluated now");
-    assert!(stop.trailing.is_none(), "fixed => no stored expr");
-}
-
-#[test]
-fn set_trailing_stop_stores_expr() {
-    let mut s = long_at(1.1000);
-    s.high_water_mark = 1.1030;
-    let q = Quote { ts: 1, bid: 1.1030, ask: 1.1032 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::SetStop { kind: StopKind::Trailing, level: Box::new(trailing_long_expr(0.0010)) }, 0.0, &ctx);
-    let stop = s.orders.stop.as_ref().unwrap();
-    assert!(approx(stop.level, 1.1020), "initial level evaluated at registration");
-    assert!(stop.trailing.is_some(), "trailing => expr stored");
-}
-
-#[test]
-fn cancel_clears_order() {
-    let mut s = long_at(1.1000);
-    s.orders.stop = Some(RestingOrder { level: 1.0980, trailing: None });
-    let q = Quote { ts: 1, bid: 0.0, ask: 0.0 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::CancelStop, 0.0, &ctx);
-    assert!(s.orders.stop.is_none());
-}
-
-#[test]
-fn over_exit_clamps_flat() {
-    let mut s = flat();
-    let q = Quote { ts: 1, bid: 0.0, ask: 0.0 };
-    let pf = test_pf();
-    let ctx = MarketCtx { q: &q, features: &[], portfolio: &pf };
-    s.apply(&Action::Enter { side: Side::Long, size: Size::Lots(2.0) }, 1.1000, &ctx);
-    s.apply(&Action::Exit { size: Size::Lots(5.0) }, 1.1000, &ctx);
-    assert!(approx(s.position_size, 0.0), "no over-exit");
-    assert!(approx(s.avg_entry_price, 0.0), "no over-exit");
-}

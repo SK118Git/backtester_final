@@ -116,7 +116,7 @@ pub enum Size { Lots(f64), Fraction(f64), RiskPct(f64)}
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub when: Expr, 
-    pub then: Action
+    pub then: Vec<Action>
 }
 
 #[derive(Debug, Clone)]

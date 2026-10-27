@@ -20,7 +20,7 @@ fn target_triggered(order: &RestingOrder, q:&Quote, is_long:bool) -> bool {
    
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum FillReason {Stop, Target, Discretionary}
 
 
@@ -28,6 +28,7 @@ pub struct Fill {
     pub price: f64,
     pub lots: f64,
     pub cost: f64,
+    pub ts: i64, 
     pub reason: FillReason
 }
 
@@ -62,14 +63,14 @@ pub fn resolve_resting(state:&PositionState, q:&Quote, cfg: &CostConfig) -> Opti
 	if stop_triggered(stop, q, is_long) {
 	    let price = fill_price(stop.level, market, is_long, FillKind::Stop, cfg.fill_bias);
 	    let cost = compute_cost(lots, price, cfg);
-	    return Some(Fill {price, lots: lots, reason: FillReason::Stop, cost: cost});
+	    return Some(Fill {price, lots: lots, reason: FillReason::Stop, cost: cost, ts:q.ts});
 	}
     }
     if let Some(tgt) = &state.orders.target {
 	if target_triggered(tgt, q, is_long) {
 	    let price = fill_price(tgt.level, market, is_long, FillKind::Target, cfg.fill_bias);
 	    let cost = compute_cost(lots, price, cfg);
-	    return Some(Fill {price, lots: lots, reason: FillReason::Target, cost:cost});
+	    return Some(Fill {price, lots: lots, reason: FillReason::Target, cost:cost, ts:q.ts});
 	}
     }
     None 
@@ -79,7 +80,7 @@ pub fn resolve_resting(state:&PositionState, q:&Quote, cfg: &CostConfig) -> Opti
 pub fn price_discretionary(signed_lots: f64, q:&Quote, cfg: &CostConfig) -> Fill {
     let price = if signed_lots > 0.0 {q.ask} else {q.bid};
     let cost = compute_cost(signed_lots, price, cfg);
-    Fill { price, lots: signed_lots, cost, reason: FillReason::Discretionary }
+    Fill { price, lots: signed_lots, cost, reason: FillReason::Discretionary, ts:q.ts}
 }
 
 

@@ -9,6 +9,7 @@ mod costs;
 mod fill;
 mod portfolio;
 mod result;
+mod backtester;
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>>{

@@ -65,6 +65,14 @@ impl Portfolio {
 	self.equity = self.cash + self.market_value;
     }
     
+    pub fn recompute_single(&mut self, pos:&PositionState, q:&Quote) {
+	self.market_value = if pos.position_size == 0.0 {0.0} else {
+	    let mark = if pos.position_size > 0.0 {q.bid} else {q.ask};
+	    pos.position_size * mark 
+	};
+	self.equity = self.cash + self.market_value;
+    }
+    
     pub fn resolve(&self, field:AccountField) -> f64 {
 	match field {
 	    AccountField::Equity => self.equity, 
@@ -94,14 +102,14 @@ mod tests {
  
         // Buy 10 @ 10: lots +10, price 10 → cash −100. No realized (opening).
         p.apply_fill(
-            &Fill { price: 10.0, lots: 10.0, cost: 0.0, reason: FillReason::Discretionary },
+            &Fill { price: 10.0, lots: 10.0, cost: 0.0, reason: FillReason::Discretionary, ts: 0},
             0.0,
         );
         assert!(approx(p.cash, 0.0), "spent 100 on the buy");
  
         // Sell 5 @ 15: lots −5, price 15 → cash +75. Realized +25 (5 × $5 gain), reporting.
         p.apply_fill(
-            &Fill { price: 15.0, lots: -5.0, cost: 0.0, reason: FillReason::Discretionary },
+            &Fill { price: 15.0, lots: -5.0, cost: 0.0, reason: FillReason::Discretionary, ts: 0},
             25.0,
         );
         assert!(approx(p.cash, 75.0), "received 75 on the sell");
@@ -136,7 +144,7 @@ mod tests {
         let mut p = Portfolio::new(100.0);
         // Buy 1 @ 10 with 0.50 commission: cash −10 − 0.50 = 89.50.
         p.apply_fill(
-            &Fill { price: 10.0, lots: 1.0, cost: 0.50, reason: FillReason::Discretionary },
+            &Fill { price: 10.0, lots: 1.0, cost: 0.50, reason: FillReason::Discretionary, ts:0 },
             0.0,
         );
         assert!(approx(p.cash, 89.50));
@@ -148,7 +156,7 @@ mod tests {
         // Short 2 @ 1.1000: sold 2, cash += 2×1.1000 = 2.2000 over start.
         let mut p = Portfolio::new(100.0);
         p.apply_fill(
-            &Fill { price: 1.1000, lots: -2.0, cost: 0.0, reason: FillReason::Discretionary },
+            &Fill { price: 1.1000, lots: -2.0, cost: 0.0, reason: FillReason::Discretionary, ts:0 },
             0.0,
         );
         assert!(approx(p.cash, 102.2000), "shorting banks the proceeds");

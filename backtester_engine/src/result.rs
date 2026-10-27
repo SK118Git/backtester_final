@@ -1,6 +1,7 @@
 use crate::fill::FillReason;
 use crate::portfolio::Portfolio;
 use crate::costs::CostConfig;
+use crate::state::PositionState;
 use serde::Serialize;
 
 use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Column};
@@ -45,7 +46,7 @@ pub struct RunConfig {
     pub instrument: String,
     pub starting_capital: f64, 
     pub cost: CostConfig, 
-    pub equity_epislon: f64,
+    pub equity_epsilon: f64,
     // TODO: date range?
 }
 
@@ -55,6 +56,7 @@ pub struct BacktestResult {
     pub equity_curve: Vec<EquityPoint>,
     pub manifest: RunManifest,
     pub final_portfolio: Portfolio,
+    pub final_position: PositionState, 
 }
 
 impl BacktestResult {
