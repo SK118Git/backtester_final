@@ -7,14 +7,16 @@ use crate::engine::{MarketCtx, select_action};
 use crate::result::*;
 
 
-pub fn action_to_fills (action: &Action, position:&PositionState, q:&Quote, cfg:&CostConfig) -> Vec<Fill> {
+pub fn action_to_fills (action: &Action, position:&PositionState, portfolio:&Portfolio, q:&Quote, cfg:&CostConfig) -> Vec<Fill> {
     let pos = position.position_size;
     
     match action {
 	Action::Enter {side, size} => {
+	    let is_buy = matches!(side, Side::Long); 
+	    let intended_entry = if is_buy {q.ask} else {q.bid};
 	    let lots = match size {
 		Size::Lots(n) => *n,
-		Size::RiskPct(_) => todo!("RiskPct needs equity + stop distance"),
+		Size::RiskPct(pct) => resolve_risk_pct(*pct, intended_entry, position, portfolio),
 		Size::Fraction(_) => todo!("Fraction on enter is nonsensical - CL should reject")
 	    };
 	    let signed = match side {Side::Long => lots, Side::Short => -lots};
@@ -46,6 +48,13 @@ pub fn action_to_fills (action: &Action, position:&PositionState, q:&Quote, cfg:
 }
 
 
+fn resolve_risk_pct(pct:f64, intended_entry:f64, position:&PositionState, portfolio:&Portfolio) -> f64 {
+    let stop = position.orders.stop.as_ref().expect("RiskPct requires sizing a stop set earlier in the same rule (stop-then-enter); CL must reject risk N% with no stop.");
+    let distance = (intended_entry - stop.level).abs();
+    assert!(distance > 1e-12, "RiskPct stop distance is ~0 ; size would be infinite");
+    let risk_amount = portfolio.equity * pct;
+    risk_amount / distance
+}
 												    
 
 pub fn run_backtest(ticks: &[Quote], strategy: &Strategy, cfg:&RunConfig) -> BacktestResult {
@@ -75,7 +84,7 @@ pub fn run_backtest(ticks: &[Quote], strategy: &Strategy, cfg:&RunConfig) -> Bac
 		       position.apply_order(action, &ctx);
 		   },
 		   Action::Enter {.. } | Action::Exit { .. } => {
-		       let fills = action_to_fills(action, &position, q, &cfg.cost);
+		       let fills = action_to_fills(action, &position, &current, q, &cfg.cost);
 		       for fill in &fills {
 			   apply_and_record(&mut position, &mut portfolio, fill, &mut trades);
 		       }
@@ -118,6 +127,7 @@ fn apply_and_record(position:&mut PositionState, portfolio: &mut Portfolio, fill
 
 
 #[cfg(test)]
+use crate::state::RestingOrder;
 mod loop_tests {
     use super::*;
     use crate::test_helpers::*;
@@ -254,5 +264,37 @@ mod loop_tests {
         assert!(result.equity_curve.len() >= 2, "at least first and last point");
         assert_eq!(result.equity_curve.first().unwrap().ts, 1);
         assert_eq!(result.equity_curve.last().unwrap().ts, 5);
+    }
+    
+    #[test]
+    fn risk_pct_sizes_against_stop_distance() {
+	// $100k equity, risk 2% = $2000. Stop 20 pips below a 1.1002 ask entry → distance 0.0020.
+	// size = 2000 / 0.0020 = 1,000,000 units.
+	let mut position = PositionState::flat();
+	// stop registered first (as stop-then-enter would do):
+	position.orders.stop = Some(RestingOrder { level: 1.1002 - 0.0020, trailing: None });
+	let portfolio = Portfolio::new(100_000.0);  // equity = 100k, flat
+	let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+	
+	let fills = action_to_fills(
+            &Action::Enter { side: Side::Long, size: Size::RiskPct(0.02) },
+            &position, &portfolio, &q, &CostConfig::default(),
+	);
+	assert_eq!(fills.len(), 1);
+    // intended entry = ask 1.1002; distance to stop 1.0982 = 0.0020; size = 2000/0.0020 = 1e6
+	assert!(approx(fills[0].lots, 1_000_000.0), "risk 2% / 20-pip stop on $100k = 1M units");
+	assert!(approx(fills[0].price, 1.1002), "filled at ask");
+    }
+    
+    #[test]
+    #[should_panic(expected = "requires")]
+    fn risk_pct_without_stop_panics() {
+	let position = PositionState::flat();  // no stop
+	let portfolio = Portfolio::new(100_000.0);
+    let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+	action_to_fills(
+            &Action::Enter { side: Side::Long, size: Size::RiskPct(0.02) },
+            &position, &portfolio, &q, &CostConfig::default(),
+	);
     }
 }

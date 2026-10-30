@@ -1,6 +1,7 @@
 use polars::prelude::*;
 use serde::Serialize;
 use sha2::{Sha256, Digest};
+use crate::ir::Quote;
 
 
 pub fn ingest(filename:&str)-> PolarsResult<LazyFrame>{
@@ -123,3 +124,34 @@ impl CleaningReport {
 	hex::encode(digest)
     }
 }
+
+
+
+pub fn load_ticks(path: &str) -> PolarsResult<Vec<Quote>> {
+    let df = LazyFrame::scan_parquet(
+	path.into(), 
+	ScanArgsParquet { 
+	    hive_options: HiveOptions { enabled: Some(true), ..Default::default()}, 
+	    ..Default::default()}
+    )?.select([col("ts"), col("bid"), col("ask")])
+	.sort(["ts"], Default::default())
+	.collect()?;
+    eprintln!("{}", df.head(Some(5)));
+    let ts_phys = df.column("ts")?.to_physical_repr();
+    let ts = ts_phys.i64()?;
+    eprintln!("first 5 ts: {:?}", (0..5).map(|i| ts.get(i)).collect::<Vec<_>>());
+    let bid = df.column("bid")?.f64()?;
+    let ask = df.column("ask")?.f64()?;
+    
+    let n = df.height();
+    let mut quotes = Vec::with_capacity(n);
+    for i in 0..n {
+	quotes.push(Quote {
+	    ts: ts.get(i).expect("non-null ts"),
+	    bid: bid.get(i).expect("non-null bid"),
+	    ask: ask.get(i).expect("non-null ask")
+	});
+    }
+    Ok(quotes)
+}
+	
