@@ -1,0 +1,4 @@
+(strategy
+  (rule (when (>= (state unrealized-pnl) take-level))
+        (then (exit (fraction 0.5))
+              (set-stop fixed (state avg-entry-price)))))

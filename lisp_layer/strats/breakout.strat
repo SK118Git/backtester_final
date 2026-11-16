@@ -1,0 +1,9 @@
+(strategy
+  (rule (when (and (= (state position-size) 0)
+                   (> (px mid) (sma slow-period))))
+        (then (set-stop trailing (- (px bid) stop-dist))
+              (enter long (risk-pct risk-frac))))
+  (rule (when (and (> (state position-size) 0)
+                   (< (px mid) (sma slow-period))))
+        (then (exit all))))
+
