@@ -244,5 +244,4 @@
     (validate-strategy ast)
     (values (null *errors*)
 	    (nreverse *errors*)
-	    (nreverse *free-vars*)))
-  )
+	    (nreverse *free-vars*))))
