@@ -10,6 +10,7 @@ mod fill;
 mod portfolio;
 mod result;
 mod backtester;
+mod parse;
 
 
 use crate::ir::*;

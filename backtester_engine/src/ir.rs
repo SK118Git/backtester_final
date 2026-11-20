@@ -123,3 +123,29 @@ pub struct Rule {
 pub struct Strategy {
     pub rules: Vec<Rule> // evaluated per tick in list's order, first to match 'when' fires
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QuoteField { Bid, Ask, Mid, Spread, BidVol, AskVol}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FeatureSpec {
+    Quote(QuoteField),
+    Indicator { name: String, args: Vec<f64>},
+    Signal(String),
+}
+
+
+#[derive(Debug, Default)]
+pub struct Features { pub specs: Vec<FeatureSpec>}
+
+impl Features {
+    pub fn intern(&mut self, spec: FeatureSpec) -> FeatureId {
+	if let Some(i) = self.specs.iter().position(|s| *s == spec) { 
+	    FeatureId(i)
+	} else {
+	    self.specs.push(spec);
+	    FeatureId(self.specs.len() -1)
+	}
+    }
+}
