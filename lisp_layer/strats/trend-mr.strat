@@ -1,0 +1,27 @@
+(strategy
+  ;; 1. Long: uptrend, not overbought, calm regime -> risk-sized with a trailing stop
+  (rule (when (and (= (state position-size) 0)
+                   (> (sma fast) (sma slow))
+                   (< (rsi rsi-win) overbought)
+                   (< (vol vol-win) vol-cap)))
+        (then (set-stop trailing (- (px bid) stop-dist))
+              (enter long (risk-pct risk))))
+
+  ;; 2. Short: mirror image
+  (rule (when (and (= (state position-size) 0)
+                   (< (sma fast) (sma slow))
+                   (> (rsi rsi-win) oversold)
+                   (< (vol vol-win) vol-cap)))
+        (then (set-stop trailing (+ (px ask) stop-dist))
+              (enter short (risk-pct risk))))
+
+  ;; 3. Scale out half once, lock the stop at breakeven
+  (rule (when (and (> (state unrealized-pnl) tp-level)
+                   (= (state num-exits) 0)))
+        (then (exit (fraction 0.5))
+              (set-stop fixed (state avg-entry-price))))
+
+  ;; 4. Time stop (guarded to only fire when actually in a trade)
+  (rule (when (and (not (= (state position-size) 0))
+                   (> (state time-in-trade) max-hold)))
+        (then (exit all))))

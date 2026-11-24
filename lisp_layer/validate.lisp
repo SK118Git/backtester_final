@@ -4,7 +4,7 @@
 (defparameter *px-fields* '(bid ask mid spread bid-vol ask-vol))
 (defparameter *state-fields* '(position-size avg-entry-price high-water-mark low-water-mark entry-time num-entries num-exits unrealized-pnl time-in-trade trailing-dist))
 (defparameter *account-fields* '(equity cash realized-pnl market-value))
-(defparameter *indicators* '(sma ema rsi atr)) ;; TODO add more/extensible
+(defparameter *indicators* '(sma ema rsi vol)) ;; TODO add more/extensible
 
 ;; operator -> (operand-type result-type min-args max-args) max = nil => unbounded
 (defparameter *operators*

@@ -1,0 +1,136 @@
+use polars::prelude::*;
+use std::path::{Path, PathBuf};
+use sha2::{Sha256, Digest};
+use crate::ir::{FeatureSpec, Quote, QuoteField};
+use crate::indicator::lower_feature;
+use crate::util::*;
+
+
+const FEATURE_IMPL_VERSION: &str = "v1";
+
+
+pub struct InstrumentData {
+    pub quotes: Vec<Quote>,
+    // Row-major: features[f + i * n_features] = value of feature f at tick i 
+    pub features: Vec<f64>, 
+    pub n_features: usize, 
+} 
+
+impl InstrumentData {
+    #[inline]
+    pub fn feature_row(&self, i: usize) -> &[f64] {
+	let start = i * self.n_features;
+	&self.features[start..start + self.n_features]
+    }
+}
+
+fn cache_dir(snapshot_id: &str, instrument: &str) -> PathBuf {
+    PathBuf::from(format!("feature_cache/snapshot={snapshot_id}/instrument={instrument}"))
+}
+
+fn feature_key(spec: &FeatureSpec) -> String {
+    let canonical = match spec {
+	FeatureSpec::Quote(q) => format!("quote_{q:?}").to_lowercase(),
+	FeatureSpec::Indicator { name, args } => {
+	    let a = args.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("_");
+	    format!("ind_{name}_{a}")
+	}
+	FeatureSpec::Signal(s) => format!("sig_{s}"),
+    };
+    let mut h = Sha256::new();
+    h.update(canonical.as_bytes());
+    h.update(FEATURE_IMPL_VERSION.as_bytes());
+    let short = &hex::encode(h.finalize())[..12];
+    format!{"{canonical}__{short}"}
+}
+
+fn write_one_col (path: &Path, col:Column) -> Result<()> {
+    let mut df = DataFrame::new_infer_height(vec![col])?;
+    let mut f = std::fs::File::create(path)?;
+    ParquetWriter::new(&mut f).finish(&mut df)?;
+    Ok(())
+}
+
+pub fn compute_features(instrument: &str, pair_glob: &str, snapshot_id: &str, specs:&[FeatureSpec]) -> Result<()> {
+    let dir = cache_dir(snapshot_id, instrument);
+    let missing: Vec<(&FeatureSpec, String)> = specs.iter() 
+	.map(|s| (s, feature_key(s)))
+	.filter(|(_, k)| !dir.join(format!("{k}.parquet")).exists())
+	.collect();
+    if missing.is_empty() {return Ok(());}
+    std::fs::create_dir_all(&dir)?;
+    
+    let mut select = vec![col("ts")];
+    for (spec, key) in &missing {
+	select.push(lower_feature(spec).map_err(|m| -> DynError {format!("feature {key}: {m}").into()})?.alias(key.as_str()));
+    }
+    let df = LazyFrame::scan_parquet(pair_glob.into(), hive())?
+	.sort(["row_id"], Default::default())
+	.select(select)
+	.collect()?;
+    let ts_path = dir.join("_ts.parquet");
+    if !ts_path.exists() {
+	write_one_col(&ts_path, df.column("ts")?.clone())?;
+    }
+    
+    for (_, key) in &missing {
+	write_one_col(&dir.join(format!("{key}.parquet")), df.column(key)?.clone())?;
+    }
+    Ok(())
+}
+
+
+pub fn load_instrument(instrument: &str, pair_glob: &str, snapshot_id: &str, specs:&[FeatureSpec], period: Option<(i64, i64)>) -> Result<InstrumentData> {
+    compute_features(instrument, pair_glob, snapshot_id, specs)?;
+    let dir = cache_dir(snapshot_id, instrument);
+    let n_features = specs.len();
+    let df = LazyFrame::scan_parquet(pair_glob.into(), hive())?
+	.select([col("row_id"), col("ts"), col("bid"), col("ask")])
+	.sort(["row_id"], Default::default())
+	.collect()?;
+    
+    let n_full = df.height();
+    let ts_phys = df.column("ts")?.to_physical_repr();
+    let ts = ts_phys.i64()?;
+    let bid = df.column("bid")?.f64()?;
+    let ask = df.column("ask")?.f64()?;
+    let ts_vec: Vec<i64> = (0..n_full).map(|i| ts.get(i).expect("non-null ts")).collect();
+    
+    
+    let (lo, hi) = match period {
+	None => (0, n_full),
+	Some((start, end)) => (
+	    ts_vec.partition_point(|&t| t < start),
+	    ts_vec.partition_point(|&t| t <= end),
+	),
+    };
+
+    let n = hi - lo;
+
+    let mut quotes = Vec::with_capacity(n);
+    for row in 0..n {
+	let i = lo + row;
+	quotes.push(Quote{
+	    ts: ts.get(i).expect("non-null ts"),
+	    bid: bid.get(i).expect("non-null bid"),
+	    ask: ask.get(i).expect("non-null ask"),
+	});
+    }
+    
+    let mut features = vec![0.0_f64; n*n_features];
+    for (f, spec) in specs.iter().enumerate() {
+	let key = feature_key(spec);
+	let feat_df = LazyFrame::scan_parquet(dir.join(format!("{key}.parquet")).to_str().unwrap().into(), Default::default())?.collect()?;
+	let feat_len = feat_df.height();
+	if feat_len != n_full {
+	    return Err(format!("cached feature {key} has {feat_len} rows but ticks have {n_full} - cache is stale or corrupt").into());
+	}
+	let feat_col = feat_df.column(&key)?.f64()?;
+	for (row,i) in (lo..hi).enumerate() {
+	    features[row * n_features + f] = feat_col.get(i).unwrap_or(f64::NAN);
+	}
+    }
+
+    Ok(InstrumentData { quotes, features, n_features })
+    
+}

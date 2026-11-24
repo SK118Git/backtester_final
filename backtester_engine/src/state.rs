@@ -42,7 +42,7 @@ impl PositionState{
 	    StateField::NumEntries => self.num_entries as f64,
 	    StateField::NumExits => self.num_exits as f64,
 	    StateField::UnrealizedPnl => self.ur_pnl(q),
-	    StateField::TimeInTrade => self.tit(q.ts) as f64,
+	    StateField::TimeInTrade => if self.position_size == 0.0 {0.0} else {self.tit(q.ts) as f64},
 	    StateField::TrailingDist => self.trailing_stop_distance(q),
 	}
     }

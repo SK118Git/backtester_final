@@ -5,6 +5,7 @@ use crate::costs::CostConfig;
 use crate::portfolio::Portfolio;
 use crate::engine::{MarketCtx, select_action};
 use crate::result::*;
+use crate::features::InstrumentData;
 
 
 pub fn action_to_fills (action: &Action, position:&PositionState, portfolio:&Portfolio, q:&Quote, cfg:&CostConfig) -> Vec<Fill> {
@@ -57,7 +58,7 @@ fn resolve_risk_pct(pct:f64, intended_entry:f64, position:&PositionState, portfo
 }
 												    
 
-pub fn run_backtest(ticks: &[Quote], strategy: &Strategy, cfg:&RunConfig) -> BacktestResult {
+pub fn run_backtest(data: &InstrumentData, strategy: &Strategy, cfg:&RunConfig, snapshot_id: &str) -> BacktestResult {
     let mut position = PositionState::flat();
     let mut portfolio = Portfolio::new(cfg.starting_capital);
     let mut current = portfolio.clone();
@@ -65,11 +66,11 @@ pub fn run_backtest(ticks: &[Quote], strategy: &Strategy, cfg:&RunConfig) -> Bac
     let mut equity_curve: Vec<EquityPoint> = Vec::new();
     let mut last_eq = portfolio.equity;
     
-    if let Some(first) = ticks.first() {
+    if let Some(first) = data.quotes.first() {
 	equity_curve.push(EquityPoint { ts: first.ts, equity: portfolio.equity })
     }
-    for q in ticks {
-	let ctx = MarketCtx {q, features: &[], portfolio: &current};
+    for (i,q) in data.quotes.iter().enumerate() {
+	let ctx = MarketCtx {q, features: data.feature_row(i), portfolio: &current};
 	position.update_trailing(&ctx);
 	
 	if let Some(fill) = resolve_resting(&position, q, &cfg.cost) {
@@ -101,12 +102,12 @@ pub fn run_backtest(ticks: &[Quote], strategy: &Strategy, cfg:&RunConfig) -> Bac
 	    last_eq = portfolio.equity
 	}
     }
-    if let Some(last) = ticks.last() {
+    if let Some(last) = data.quotes.last() {
 	equity_curve.push(EquityPoint { ts: last.ts, equity: portfolio.equity });
     }
 
     let manifest = RunManifest {
-	data_snapshot_id: String::new(), // TODO
+	data_snapshot_id: snapshot_id.to_string(),
 	strategy_hash: String::new(),  // TODO 
 	config: cfg.clone(), 
 	cost_model_version: String::from("unversioned"), // TODO 	
@@ -125,11 +126,10 @@ fn apply_and_record(position:&mut PositionState, portfolio: &mut Portfolio, fill
 }
 
 
-
 #[cfg(test)]
-use crate::state::RestingOrder;
 mod loop_tests {
     use super::*;
+    use crate::state::RestingOrder;
     use crate::test_helpers::*;
     use crate::ir::*;
     use crate::costs::CostConfig;
@@ -140,11 +140,15 @@ mod loop_tests {
             starting_capital: 100_000.0,
             cost: CostConfig::default(),
             equity_epsilon: 1e-6,
+            period: None,
         }
     }
 
-    fn ticks(prices: &[(i64, f64, f64)]) -> Vec<Quote> {
-        prices.iter().map(|(ts, bid, ask)| Quote { ts: *ts, bid: *bid, ask: *ask }).collect()
+    // Build an InstrumentData with no features from a plain tick list; the loop
+    // takes &InstrumentData now, so the old `&[Quote]` call sites went through this.
+    fn data_of(prices: &[(i64, f64, f64)]) -> InstrumentData {
+        let quotes = prices.iter().map(|(ts, bid, ask)| Quote { ts: *ts, bid: *bid, ask: *ask }).collect();
+        InstrumentData { quotes, features: Vec::new(), n_features: 0 }
     }
 
     // ---- empty / no-op cases ----
@@ -152,8 +156,8 @@ mod loop_tests {
     #[test]
     fn empty_strategy_never_trades() {
         let strategy = Strategy { rules: vec![] };
-        let t = ticks(&[(1, 1.1000, 1.1002), (2, 1.1010, 1.1012), (3, 1.1005, 1.1007)]);
-        let result = run_backtest(&t, &strategy, &run_cfg());
+        let data = data_of(&[(1, 1.1000, 1.1002), (2, 1.1010, 1.1012), (3, 1.1005, 1.1007)]);
+        let result = run_backtest(&data, &strategy, &run_cfg(), "test");
         assert!(result.trades.is_empty(), "no rules => no trades");
         assert!(approx(result.final_portfolio.equity, 100_000.0), "equity unchanged");
         assert!(approx(result.final_position.position_size, 0.0));
@@ -162,7 +166,8 @@ mod loop_tests {
     #[test]
     fn no_ticks_returns_starting_state() {
         let strategy = Strategy { rules: vec![] };
-        let result = run_backtest(&[], &strategy, &run_cfg());
+        let data = data_of(&[]);
+        let result = run_backtest(&data, &strategy, &run_cfg(), "test");
         assert!(approx(result.final_portfolio.equity, 100_000.0));
         assert!(result.trades.is_empty());
     }
@@ -192,9 +197,9 @@ mod loop_tests {
             ],
         };
         // tick1: enter @ ask 1.1002 + set stop at 1.0980 (same tick).
-        // tick2: bid gaps down to 1.0975 (< 1.0980) → stop fires. Protected from tick 1.
-        let t = ticks(&[(1, 1.1000, 1.1002), (2, 1.0975, 1.0977)]);
-        let result = run_backtest(&t, &strategy, &run_cfg());
+        // tick2: bid gaps down to 1.0975 (< 1.0980) -> stop fires. Protected from tick 1.
+        let data = data_of(&[(1, 1.1000, 1.1002), (2, 1.0975, 1.0977)]);
+        let result = run_backtest(&data, &strategy, &run_cfg(), "test");
 
         // The stop existed from tick 1, so the tick-2 gap fires it.
         let stop_exits: Vec<_> = result.trades.iter()
@@ -244,8 +249,8 @@ mod loop_tests {
             ],
         };
         // tick1 enter; tick2 (still up) stop gets set; tick3 price drops, stop fires.
-        let t = ticks(&[(1, 1.1000, 1.1002), (2, 1.1010, 1.1012), (3, 1.0975, 1.0977)]);
-        let result = run_backtest(&t, &strategy, &run_cfg());
+        let data = data_of(&[(1, 1.1000, 1.1002), (2, 1.1010, 1.1012), (3, 1.0975, 1.0977)]);
+        let result = run_backtest(&data, &strategy, &run_cfg(), "test");
 
         let exits: Vec<_> = result.trades.iter()
             .filter(|tr| matches!(tr.reason, crate::fill::FillReason::Stop)).collect();
@@ -259,42 +264,42 @@ mod loop_tests {
     #[test]
     fn equity_curve_has_endpoints() {
         let strategy = Strategy { rules: vec![] };
-        let t = ticks(&[(1, 1.1000, 1.1002), (5, 1.1010, 1.1012)]);
-        let result = run_backtest(&t, &strategy, &run_cfg());
+        let data = data_of(&[(1, 1.1000, 1.1002), (5, 1.1010, 1.1012)]);
+        let result = run_backtest(&data, &strategy, &run_cfg(), "test");
         assert!(result.equity_curve.len() >= 2, "at least first and last point");
         assert_eq!(result.equity_curve.first().unwrap().ts, 1);
         assert_eq!(result.equity_curve.last().unwrap().ts, 5);
     }
-    
+
     #[test]
     fn risk_pct_sizes_against_stop_distance() {
-	// $100k equity, risk 2% = $2000. Stop 20 pips below a 1.1002 ask entry → distance 0.0020.
-	// size = 2000 / 0.0020 = 1,000,000 units.
-	let mut position = PositionState::flat();
-	// stop registered first (as stop-then-enter would do):
-	position.orders.stop = Some(RestingOrder { level: 1.1002 - 0.0020, trailing: None });
-	let portfolio = Portfolio::new(100_000.0);  // equity = 100k, flat
-	let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
-	
-	let fills = action_to_fills(
+        // $100k equity, risk 2% = $2000. Stop 20 pips below a 1.1002 ask entry -> distance 0.0020.
+        // size = 2000 / 0.0020 = 1,000,000 units.
+        let mut position = PositionState::flat();
+        // stop registered first (as stop-then-enter would do):
+        position.orders.stop = Some(RestingOrder { level: 1.1002 - 0.0020, trailing: None });
+        let portfolio = Portfolio::new(100_000.0);  // equity = 100k, flat
+        let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+
+        let fills = action_to_fills(
             &Action::Enter { side: Side::Long, size: Size::RiskPct(0.02) },
             &position, &portfolio, &q, &CostConfig::default(),
-	);
-	assert_eq!(fills.len(), 1);
-    // intended entry = ask 1.1002; distance to stop 1.0982 = 0.0020; size = 2000/0.0020 = 1e6
-	assert!(approx(fills[0].lots, 1_000_000.0), "risk 2% / 20-pip stop on $100k = 1M units");
-	assert!(approx(fills[0].price, 1.1002), "filled at ask");
+        );
+        assert_eq!(fills.len(), 1);
+        // intended entry = ask 1.1002; distance to stop 1.0982 = 0.0020; size = 2000/0.0020 = 1e6
+        assert!(approx(fills[0].lots, 1_000_000.0), "risk 2% / 20-pip stop on $100k = 1M units");
+        assert!(approx(fills[0].price, 1.1002), "filled at ask");
     }
-    
+
     #[test]
     #[should_panic(expected = "requires")]
     fn risk_pct_without_stop_panics() {
-	let position = PositionState::flat();  // no stop
-	let portfolio = Portfolio::new(100_000.0);
-    let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
-	action_to_fills(
+        let position = PositionState::flat();  // no stop
+        let portfolio = Portfolio::new(100_000.0);
+        let q = Quote { ts: 1, bid: 1.1000, ask: 1.1002 };
+        action_to_fills(
             &Action::Enter { side: Side::Long, size: Size::RiskPct(0.02) },
             &position, &portfolio, &q, &CostConfig::default(),
-	);
+        );
     }
 }

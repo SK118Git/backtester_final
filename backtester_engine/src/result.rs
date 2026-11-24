@@ -7,6 +7,8 @@ use serde::Serialize;
 use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Column};
 use std::fs::File;
 use std::path::Path; 
+use crate::util::Result;
+
 
 
 #[derive(Debug, Clone)]
@@ -47,7 +49,7 @@ pub struct RunConfig {
     pub starting_capital: f64, 
     pub cost: CostConfig, 
     pub equity_epsilon: f64,
-    // TODO: date range?
+    pub period: Option<(i64, i64)>
 }
 
 #[derive(Debug)]
@@ -60,7 +62,7 @@ pub struct BacktestResult {
 }
 
 impl BacktestResult {
-    pub fn save_parquet(&self, dir: &std::path::Path) ->Result<(), Box<dyn std::error::Error>> {
+    pub fn save_parquet(&self, dir: &std::path::Path) ->Result<()> {
 	std::fs::create_dir_all(dir)?;
 	let mut trades = DataFrame::new_infer_height(vec![
 	    Column::new("ts".into(), self.trades.iter().map(|t| t.ts).collect::<Vec<_>>()),
@@ -84,7 +86,7 @@ impl BacktestResult {
     }
     
 
-    pub fn save_json(&self, path:&Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_json(&self, path:&Path) -> Result<()> {
 	let f = File::create(path)?;
 	serde_json::to_writer_pretty(f, &self.manifest)?;
 	Ok(())

@@ -2,6 +2,7 @@ use polars::prelude::*;
 use serde::Serialize;
 use sha2::{Sha256, Digest};
 use crate::ir::Quote;
+use crate::util::{Result, hive};
 
 
 pub fn ingest(filename:&str)-> PolarsResult<LazyFrame>{
@@ -33,8 +34,10 @@ pub fn ingest(filename:&str)-> PolarsResult<LazyFrame>{
 }
 
 
-pub fn partition_data(filename:&str, ticker:&str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn partition_data(filename:&str, ticker:&str) -> Result<()> {
     let lf = ingest(filename)?
+	.sort(["ts"], SortMultipleOptions::default().with_maintain_order(true))
+	.with_row_index("row_id", None)
 	.with_columns([
 	    col("ts").dt().year().alias("year"),
 	    col("ts").dt().month().alias("month"),
@@ -81,7 +84,7 @@ struct CleaningReport {
 }
 
 impl CleaningReport {
-    fn new(lf:LazyFrame)->Result<CleaningReport, Box<dyn std::error::Error>> {
+    fn new(lf:LazyFrame)->Result<CleaningReport> {
 	let df = lf.select([ 
 	    len().alias("n_rows"),
 	    col("ts").min().alias("first_ts"),
@@ -101,7 +104,7 @@ impl CleaningReport {
 	    n_not_crossed: df.column("n_not_crossed")?.u32()?.get(0).expect("Less than one row when creating cleaning report"),
 	})
     }
-    fn save(&self, ticker:&str) -> Result<(), Box<dyn std::error::Error>> {
+    fn save(&self, ticker:&str) -> Result<()> {
 	let hash = self.snapshot_id(ticker);
 	let path = format!("clrep/{ticker}_{hash}.json");
 	std::fs::create_dir_all("clrep")?;
@@ -129,10 +132,7 @@ impl CleaningReport {
 
 pub fn load_ticks(path: &str) -> PolarsResult<Vec<Quote>> {
     let df = LazyFrame::scan_parquet(
-	path.into(), 
-	ScanArgsParquet { 
-	    hive_options: HiveOptions { enabled: Some(true), ..Default::default()}, 
-	    ..Default::default()}
+	path.into(), hive(), 
     )?.select([col("ts"), col("bid"), col("ask")])
 	.sort(["ts"], Default::default())
 	.collect()?;
@@ -155,3 +155,16 @@ pub fn load_ticks(path: &str) -> PolarsResult<Vec<Quote>> {
     Ok(quotes)
 }
 	
+
+
+pub fn data_snapshot_id(instrument: &str, pair_glob:&str) -> Result<String> {
+    let lf = LazyFrame::scan_parquet(
+	pair_glob.into(),
+	ScanArgsParquet { 
+	    hive_options: HiveOptions {enabled: Some(true), ..Default::default()},
+	    ..Default::default()
+	},
+    )?;
+    let report = CleaningReport::new(lf)?;
+    Ok(report.snapshot_id(instrument))
+}
